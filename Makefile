@@ -33,3 +33,9 @@ clean:
 prune-pulsecore: # Remove unused headers from pulsecore/
 	@for f in pulsecore/*; do ${MAKE} clean; git rm -r $$f; \
 		if ! ${MAKE}; then git reset HEAD $$f && git checkout $$f; fi; done
+
+archive:
+	@tag=$$(git tag --contains HEAD); git archive \
+			--prefix=pulseaudio-module-sndio-$$tag/ \
+			--output=pulseaudio-module-sndio-$$tag.tar.gz \
+			$$tag
