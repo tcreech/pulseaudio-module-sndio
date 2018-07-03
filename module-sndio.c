@@ -143,44 +143,53 @@ sndio_sink_message(pa_msgobject *o, int code, void *data, int64_t offset,
 	switch (code) {
 	case PA_SINK_MESSAGE_GET_LATENCY:
 		pa_log_debug("sink:PA_SINK_MESSAGE_GET_LATENCY");
-		*(pa_usec_t*)data = pa_bytes_to_usec(u->par.bufsz,
+		*(int64_t*)data = pa_bytes_to_usec(u->par.bufsz,
 		    &u->sink->sample_spec);
 		return (0);
-	case PA_SINK_MESSAGE_SET_STATE:
-		pa_log_debug("sink:PA_SINK_MESSAGE_SET_STATE ");
-		state = (pa_sink_state_t)(data);
-		switch (state) {
-		case PA_SINK_SUSPENDED:
-			pa_log_debug("SUSPEND");
-			if (u->sink_running == 1)
-				sio_stop(u->hdl);
-			u->sink_running = 0;
-			break;
-		case PA_SINK_IDLE:
-		case PA_SINK_RUNNING:
-			pa_log_debug((code == PA_SINK_IDLE) ? "IDLE":"RUNNING");
-			if (u->sink_running == 0)
-				sio_start(u->hdl);
-			u->sink_running = 1;
-			break;
-		case PA_SINK_INVALID_STATE:
-			pa_log_debug("INVALID_STATE");
-			break;
-		case PA_SINK_UNLINKED:
-			pa_log_debug("UNLINKED");
-			break;
-		case PA_SINK_INIT:
-			pa_log_debug("INIT");
-			break;
-		}
+	}
+
+	return pa_sink_process_msg(o, code, data, offset, chunk);
+}
+
+static int
+sink_set_state_in_io_thread_cb(pa_sink *s, pa_sink_state_t new_state, pa_suspend_cause_t new_suspend_cause) {
+	struct userdata *u;
+	pa_assert(s);
+	pa_assert_se(u = s->userdata);
+
+	/* It may be that only the suspend cause is changing, in which case there's 
+	 * nothing to do. */
+	if (new_state == s->thread_info.state)
+		return 0;
+
+	switch (new_state) {
+	case PA_SINK_SUSPENDED:
+		pa_log_debug("SUSPEND");
+		if (u->sink_running == 1)
+			sio_stop(u->hdl);
+		u->sink_running = 0;
+		break;
+	case PA_SINK_IDLE:
+	case PA_SINK_RUNNING:
+		pa_log_debug((new_state == PA_SINK_IDLE) ? "IDLE":"RUNNING");
+		if (u->sink_running == 0)
+			sio_start(u->hdl);
+		u->sink_running = 1;
+		break;
+	case PA_SINK_INVALID_STATE:
+		pa_log_debug("INVALID_STATE");
+		break;
+	case PA_SINK_UNLINKED:
+		pa_log_debug("UNLINKED");
+		break;
+	case PA_SINK_INIT:
+		pa_log_debug("INIT");
 		break;
 	default:
 		pa_log_debug("sink:PA_SINK_???");
 	}
 
-	ret = pa_sink_process_msg(o, code, data, offset, chunk);
-
-	return (ret);
+	return (0);
 }
 
 static void
@@ -188,11 +197,10 @@ sndio_thread(void *arg)
 {
 	struct userdata	*u = arg;
 	int		 ret;
-	short		 revents, events;
+	int		 revents, events;
 	struct pollfd	*fds_sio;
-	size_t		 w, r, l;
+	size_t		 w, r;
 	char		*p;
-	struct pa_memchunk memchunk;
 
 	pa_log_debug("sndio thread starting up");
 
@@ -273,7 +281,6 @@ pa__init(pa_module *m)
 	pa_sample_spec		 ss;
 	pa_channel_map		 map;
 	pa_sink_new_data	 sink;
-	pa_source_new_data	 source;
 
 	struct sio_par		 par;
 	char			 buf[256];
@@ -290,7 +297,10 @@ pa__init(pa_module *m)
 	u->core = m->core;
 	u->module = m;
 	u->rtpoll = pa_rtpoll_new();
-	pa_thread_mq_init(&u->thread_mq, m->core->mainloop, u->rtpoll);
+	if (pa_thread_mq_init(&u->thread_mq, m->core->mainloop, u->rtpoll) < 0) {
+		pa_log("pa_thread_mq_init() failed.");
+		goto fail;
+	}
 
 	if (!(ma = pa_modargs_new(m->argument, modargs))) {
 		pa_log("Failed to parse module arguments.");
@@ -428,6 +438,7 @@ pa__init(pa_module *m)
 
 	u->sink->userdata = u;
 	u->sink->parent.process_msg = sndio_sink_message;
+	u->sink->set_state_in_io_thread = sink_set_state_in_io_thread_cb;
 	pa_sink_set_asyncmsgq(u->sink, u->thread_mq.inq);
 	pa_sink_set_rtpoll(u->sink, u->rtpoll);
 	pa_sink_set_fixed_latency(u->sink,
