@@ -40,7 +40,6 @@
 /*
  * TODO
  *
- * - handle latency correctly
  * - make recording work correctly with playback
  */
 
@@ -85,6 +84,8 @@ struct userdata {
 	struct sio_hdl	*hdl;
 	struct sio_par	 par;
 	size_t		 bufsz;
+	long long	 realpos;		/* bytes heard */
+	long long	 writepos;		/* bytes written */
 
 	int		 sink_running;
 	unsigned int	 volume;
@@ -143,7 +144,7 @@ sndio_sink_message(pa_msgobject *o, int code, void *data, int64_t offset,
 	switch (code) {
 	case PA_SINK_MESSAGE_GET_LATENCY:
 		pa_log_debug("sink:PA_SINK_MESSAGE_GET_LATENCY");
-		*(int64_t*)data = pa_bytes_to_usec(u->par.bufsz,
+		*(int64_t*)data = pa_bytes_to_usec(u->writepos - u->realpos,
 		    &u->sink->sample_spec);
 		return (0);
 	}
@@ -226,6 +227,8 @@ sndio_thread(void *arg)
 			p = pa_memblock_acquire(u->memchunk.memblock);
 			w = sio_write(u->hdl, p + u->memchunk.index,
 			    u->memchunk.length);
+			if (w >= 0)
+			    u->writepos += w;
 			pa_memblock_release(u->memchunk.memblock);
 			pa_log_debug("wrote %zu bytes of %zu", w,
 			    u->memchunk.length);
@@ -272,6 +275,14 @@ sndio_thread(void *arg)
 	pa_asyncmsgq_wait_for(u->thread_mq.inq, PA_MESSAGE_SHUTDOWN);
     finish:
 	pa_log_debug("sndio thread shutting down");
+}
+
+static void
+sndio_onmove_cb(void* addr, int delta)
+{
+	struct userdata *u = addr;
+	/* Convert delta from frames to bytes. */
+	u->realpos += (delta * u->par.bps * u->par.pchan);
 }
 
 int
@@ -392,6 +403,13 @@ pa__init(pa_module *m)
 	/* XXX what to do with map? */
 
 	u->bufsz = u->par.bufsz * u->par.bps * u->par.pchan;
+
+
+	/* Set up a callback to help compute delay. With this arrangement, the
+	 * sndio callback will update realpos, and this plugin will update
+	 * writepos. The delay of writepos can then be used to compute our
+	 * effective latency. */
+	sio_onmove(u->hdl, sndio_onmove_cb, u);
 
 	nfds = sio_nfds(u->hdl);
 	u->rtpoll_item = pa_rtpoll_item_new(u->rtpoll, PA_RTPOLL_NEVER, nfds);
