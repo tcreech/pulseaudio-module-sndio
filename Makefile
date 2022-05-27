@@ -31,7 +31,7 @@ clean:
 	rm -f module-sndio.o module-sndio.so
 
 prune-pulsecore: # Remove unused headers from pulsecore/
-	@for f in pulsecore/*; do ${MAKE} clean; git rm -r $$f; \
+	@for f in $$(git ls-files -- pulsecore/); do ${MAKE} clean; git rm -r $$f; \
 		if ! ${MAKE}; then git reset HEAD $$f && git checkout $$f; fi; done
 
 archive:
